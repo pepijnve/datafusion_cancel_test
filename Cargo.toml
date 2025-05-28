@@ -1,0 +1,20 @@
+[package]
+name = "datafusion_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures = "0.3.31"
+arrow = "55.0.0"
+datafusion = "47.0.0"
+
+[dependencies.tokio]
+version = "1.45.1"
+features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "parking_lot",
+    "signal",
+]
