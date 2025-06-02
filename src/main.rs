@@ -1,196 +1,114 @@
 use arrow::array::{Int64Array, RecordBatch};
-use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
-use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use arrow::datatypes::{DataType, Field, Fields, Schema};
+use datafusion::common::ScalarValue::Int64;
+use datafusion::config::ConfigOptions;
 use datafusion::functions_aggregate::sum;
+use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::aggregate::AggregateExprBuilder;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::expressions::{binary, col, lit};
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
+use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::union::InterleaveExec;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
-use datafusion::{common, physical_plan};
-use futures::{Stream, StreamExt};
-use std::any::Any;
+use datafusion_test::infinite_stream::InfiniteExec;
+use datafusion_test::wrap_leaves::WrapLeaves;
+use futures::StreamExt;
 use std::error::Error;
-use std::fmt::Formatter;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use datafusion::physical_plan::stream::RecordBatchReceiverStreamBuilder;
-
-struct InfiniteStream {
-    batch: RecordBatch,
-    poll_count: usize,
-}
-
-impl RecordBatchStream for InfiniteStream {
-    fn schema(&self) -> SchemaRef {
-        self.batch.schema()
-    }
-}
-
-impl Stream for InfiniteStream {
-    type Item = common::Result<RecordBatch>;
-
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.poll_count += 1;
-        if self.poll_count % 10_000 == 0 {
-            println!("InfiniteStream::poll_next {} times", self.poll_count);
-        }
-        Poll::Ready(Some(Ok(self.batch.clone())))
-    }
-}
-
-#[derive(Debug)]
-struct InfiniteExec {
-    batch: RecordBatch,
-    properties: PlanProperties,
-}
-
-impl InfiniteExec {
-    fn new(batch: &RecordBatch) -> Self {
-        InfiniteExec {
-            batch: batch.clone(),
-            properties: PlanProperties::new(
-                EquivalenceProperties::new(batch.schema().clone()),
-                Partitioning::UnknownPartitioning(1),
-                EmissionType::Incremental,
-                Boundedness::Unbounded {
-                    requires_infinite_memory: false,
-                },
-            ),
-        }
-    }
-}
-
-impl DisplayAs for InfiniteExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "infinite")
-    }
-}
-
-impl ExecutionPlan for InfiniteExec {
-    fn name(&self) -> &str {
-        "infinite"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.batch.schema()
-    }
-
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> common::Result<Arc<dyn ExecutionPlan>> {
-        Ok(self.clone())
-    }
-
-    fn execute(
-        &self,
-        _partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> common::Result<SendableRecordBatchStream> {
-        Ok(Box::pin(InfiniteStream {
-            batch: self.batch.clone(),
-            poll_count: 0,
-        }))
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // 1) build session & schema & sample batch
-    let session_ctx = SessionContext::new();
+    let session_context = SessionContext::new();
+
     let schema = Arc::new(Schema::new(Fields::try_from(vec![Field::new(
         "value",
         DataType::Int64,
         false,
     )])?));
-    let mut builder = Int64Array::builder(8192);
-    for v in 0..8192 {
-        builder.append_value(v);
-    }
-    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(builder.finish())])?;
 
-    // 2) set up the infinite source + aggregation
-    let inf = Arc::new(InfiniteExec::new(&batch));
-    let aggr = Arc::new(AggregateExec::try_new(
+    let mut column_builder = Int64Array::builder(8192);
+    for v in 0..8192 {
+        column_builder.append_value(v as i64);
+    }
+    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(column_builder.finish())])?;
+
+    let mut branches: Vec<Arc<dyn ExecutionPlan>> = vec![];
+    for i in 0..10 {
+        let inf1 = Arc::new(InfiniteExec::new(&batch));
+        let filter1 = Arc::new(FilterExec::try_new(
+            binary(
+                col("value", &schema)?,
+                Operator::Gt,
+                lit(Int64(Some(8192 - i * 81))),
+                &schema,
+            )?,
+            inf1,
+        )?);
+        let coalesce1 = Arc::new(CoalesceBatchesExec::new(
+            filter1,
+            session_context.copied_config().batch_size()
+        ));
+
+        branches.push(coalesce1);
+    }
+
+    let interleave = Arc::new(InterleaveExec::try_new(branches)?);
+    let aggr_total = Arc::new(AggregateExec::try_new(
         AggregateMode::Single,
         PhysicalGroupBy::new(vec![], vec![], vec![]),
         vec![Arc::new(
             AggregateExprBuilder::new(
                 sum::sum_udaf(),
-                vec![Arc::new(
-                    datafusion::physical_expr::expressions::Column::new_with_schema(
-                        "value", &schema,
-                    )?,
-                )],
+                vec![col("value", &interleave.schema())?],
             )
-            .schema(inf.schema())
-            .alias("sum")
-            .build()?,
+                .schema(interleave.schema().clone())
+                .alias("total")
+                .build()?,
         )],
         vec![None],
-        inf.clone(),
-        inf.schema(),
+        interleave.clone(),
+        interleave.schema(),
     )?);
 
-    // 3) get the stream
-    let mut stream = physical_plan::execute_stream(aggr, session_ctx.task_ctx())?;
+    let plan = WrapLeaves {}.optimize(aggr_total, &ConfigOptions::default())?;
+    // let plan = aggr_total;
 
-    const USE_TASK: bool = false;
-    
-    if USE_TASK {
-        let mut builder = RecordBatchReceiverStreamBuilder::new(stream.schema(), 10);
-        let tx = builder.tx();
-        builder.spawn(async move {
-            while let Some(item) = stream.next().await {
-                let _ = tx.send(item).await;
-            }
-    
-            Ok(())
-        });
-        stream = builder.build();
-    }
+    let displayable_execution_plan = physical_plan::displayable(&*plan);
 
-    const TIMEOUT: u64 = 5;
-    println!("Running query; will time out after {} seconds", TIMEOUT);
-    // 4) drive the stream inline in select!
-    let result = tokio::select! {
-    batch_opt = async {
-        loop {
-            if let Some(item) = stream.next().await {
-                break Some(item);
-            } else {
-                break None;
-            }
-        }
-    } => batch_opt,
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(TIMEOUT)) => {
-            println!("Timeout reached!");
+    println!("Physical plan");
+    println!("=============");
+    println!("{}", displayable_execution_plan.indent(false));
+
+    let mut stream = physical_plan::execute_stream(plan, session_context.task_ctx())?;
+
+    println!("Running query");
+    let next = tokio::select! {
+        res = stream.next() => res,
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+            println!("Cancellation received!");
             None
-        }
+        },
     };
 
-    // 5) handle the outcome
-    match result {
-        None => println!("No result (cancelled or empty)"),
-        Some(Ok(batch)) => println!("Got batch with {} rows", batch.num_rows()),
-        Some(Err(e)) => eprintln!("Error: {}", e),
+    match next {
+        None => {
+            println!("No result");
+        }
+        Some(Ok(batch)) => {
+            println!("Batch of size {}", batch.num_rows());
+        }
+        Some(Err(_)) => {
+            println!("Error");
+        }
     }
 
-    println!("Exiting, stream will be dropped now");
+    println!("Dropping stream");
+    drop(stream);
+
     Ok(())
 }
+
