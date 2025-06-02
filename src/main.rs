@@ -15,7 +15,7 @@ use datafusion::physical_plan::union::InterleaveExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use datafusion_test::infinite_stream::InfiniteExec;
-use datafusion_test::wrap_leaves::WrapLeaves;
+use datafusion_test::wrap_leaves::{WrapChildren, WrapLeaves};
 use futures::StreamExt;
 use std::error::Error;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             binary(
                 col("value", &schema)?,
                 Operator::Gt,
-                lit(Int64(Some(8192 - i * 81))),
+                lit(Int64(Some(8192 - (i + 1) * 81))),
                 &schema,
             )?,
             inf1,
@@ -73,9 +73,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         interleave.clone(),
         interleave.schema(),
     )?);
-
+    
     let plan = WrapLeaves {}.optimize(aggr_total, &ConfigOptions::default())?;
-    // let plan = aggr_total;
+    // let plan = WrapChildren {}.optimize(aggr_total, &ConfigOptions::default())?;
 
     let displayable_execution_plan = physical_plan::displayable(&*plan);
 
