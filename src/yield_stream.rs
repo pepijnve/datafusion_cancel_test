@@ -28,7 +28,7 @@ impl Stream for YieldStream {
     type Item = common::Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        maybe_poll!(self.inner, .poll_next_unpin(cx), self.poll_budget)
+        maybe_poll!(self.poll_budget, self.inner.poll_next_unpin(cx))
     }
 }
 

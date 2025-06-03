@@ -1,4 +1,3 @@
-use std::pin::Pin;
 use std::task::Poll::{Pending, Ready};
 use std::task::{Context, Poll};
 
@@ -41,11 +40,16 @@ impl PollBudget {
 
 #[macro_export]
 macro_rules! maybe_poll {
-    ($stream:expr, . $poll_method:ident ( $cx:expr ), $budget:expr) => {
+    // Munch TTs until we find the final function call assuming it's a call to poll_next like
+    // function. Expand to the argument list.
+    (@poll_args ( $( $args:expr ),* ) ) => { $($args),* };
+    (@poll_args $head:tt $($tail:tt)+) => { maybe_poll!(@poll_args $($tail)+) };
+    
+    ($budget:expr, $($poll_call:tt)*) => {
         {
-            match $budget.consume_budget($cx) {
+            match $budget.consume_budget(maybe_poll!(@poll_args $($poll_call)*)) {
                 std::task::Poll::Ready(_) => {
-                    let poll = ($stream).$poll_method($cx);
+                    let poll = $($poll_call)*;
                     if poll.is_pending() {
                         $budget.reset_budget();
                     }
