@@ -19,6 +19,7 @@ use datafusion_test::wrap_leaves::{WrapChildren, WrapLeaves};
 use futures::StreamExt;
 use std::error::Error;
 use std::sync::Arc;
+use datafusion_test::poll_budget::PollBudget;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -105,7 +106,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("Error");
         }
     }
-
+    
     println!("Dropping stream");
     drop(stream);
 

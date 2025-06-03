@@ -5,7 +5,7 @@ use datafusion::config::ConfigOptions;
 use datafusion::common;
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode, TreeNodeRecursion};
 use datafusion::physical_plan::execution_plan::EmissionType;
-use crate::yield_stream::YieldStreamExec;
+use crate::yield_operator::YieldStreamExec;
 
 #[derive(Debug)]
 pub struct WrapLeaves {}
